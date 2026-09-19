@@ -3,6 +3,8 @@ import pandas as pd
 import numpy as np
 from fdp.generator import inject_defects, DEFECT_TYPES
 from fdp.generator import generate_reference, generate_day
+from fdp.generator import inject_frauds, FRAUD_SCENARIOS
+
 
 DAY = date(2026, 9, 1)
 
@@ -29,3 +31,22 @@ def test_defects_injected_as_declared():
     assert len(dirty) == len(tx) + 10
     assert (dirty["currency"] == "ZZZ").sum() == 10
     assert (dirty["transaction_id"] == "").sum() == 10
+
+def test_frauds_injected_and_labelled():
+    customers, accounts, tx = make()
+    fraud_tx, labels = inject_frauds(tx, customers, accounts, DAY, np.random.default_rng(0), rate=0.01)
+    assert set(labels["scenario"]) == set(FRAUD_SCENARIOS)
+    assert fraud_tx["transaction_id"].is_unique
+    assert labels["transaction_id"].isin(fraud_tx["transaction_id"]).all()
+    # les pics de montant respectent bien le facteur ×8 minimum
+    typical = accounts.merge(customers, on="customer_id").set_index("account_id")["typical_amount"]
+    spike_ids = labels.query("scenario == 'amount_spike'")["transaction_id"]
+    spikes = fraud_tx[fraud_tx["transaction_id"].isin(spike_ids)]
+    assert (spikes["amount"] >= 8 * spikes["account_id"].map(typical) - 0.01).all()
+
+def test_defects_never_hit_frauds():
+    customers, accounts, tx = make()
+    fraud_tx, labels = inject_frauds(tx, customers, accounts, DAY, np.random.default_rng(0), rate=0.01)
+    _, manifest = inject_defects(fraud_tx, np.random.default_rng(1), rate=0.02,
+                                 exclude_ids=labels["transaction_id"])
+    assert not manifest["transaction_id"].isin(labels["transaction_id"]).any()

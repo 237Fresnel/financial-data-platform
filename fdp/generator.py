@@ -14,6 +14,11 @@ TX_TYPE_PROBS = [0.6, 0.2, 0.1, 0.1]
 _w = np.array([1, 1, 1, 1, 1, 2, 4, 6, 8, 8, 8, 8, 9, 8, 8, 8, 8, 8, 8, 7, 6, 4, 3, 2], float)
 HOUR_PROBS = _w / _w.sum()  # activité surtout en journée
 
+DEFECT_TYPES = ["missing_id", "non_positive_amount", "unknown_currency",
+                "unknown_account", "invalid_timestamp"]
+
+FRAUD_SCENARIOS = ["amount_spike", "foreign_country", "night_activity", "burst"]
+
 
 def generate_reference(n_customers: int, seed: int):
     rng = np.random.default_rng(seed)
@@ -56,16 +61,15 @@ def generate_day(day: date, customers, accounts, n_tx: int, seed: int) -> pd.Dat
     })
     return df.sort_values("transaction_timestamp").reset_index(drop=True)
 
-DEFECT_TYPES = ["missing_id", "non_positive_amount", "unknown_currency",
-                "unknown_account", "invalid_timestamp"]
 
-
-def inject_defects(df, rng, rate=0.01, duplicate_rate=0.01):
+def inject_defects(df, rng, rate=0.01, duplicate_rate=0.01, exclude_ids=()):
+    ...
     """Retourne (données dégradées, manifeste des défauts injectés)."""
     df = df.copy()
     df["transaction_timestamp"] = df["transaction_timestamp"].dt.strftime("%Y-%m-%d %H:%M:%S")
     n_each = int(len(df) * rate)
-    chosen = rng.choice(len(df), n_each * len(DEFECT_TYPES), replace=False)
+    candidates = np.flatnonzero(~df["transaction_id"].isin(exclude_ids))   # nouveau
+    chosen = rng.choice(candidates, n_each * len(DEFECT_TYPES), replace=False)  # len(df) → candidates
     manifest = []
 
     for k, defect in enumerate(DEFECT_TYPES):
@@ -82,12 +86,62 @@ def inject_defects(df, rng, rate=0.01, duplicate_rate=0.01):
         elif defect == "invalid_timestamp":
             df.loc[rows, "transaction_timestamp"] = "2026-13-45 25:61:00"
 
-    clean = np.setdiff1d(np.arange(len(df)), chosen)
+    clean = np.setdiff1d(candidates, chosen)
     dups = df.loc[rng.choice(clean, int(len(df) * duplicate_rate), replace=False)]
     manifest += [(tid, "duplicate") for tid in dups["transaction_id"]]
     df = pd.concat([df, dups])
     df = df.iloc[rng.permutation(len(df))].reset_index(drop=True)  # fichier non trié, réaliste
     return df, pd.DataFrame(manifest, columns=["transaction_id", "defect_type"])
+
+
+def inject_frauds(df, customers, accounts, day, rng, rate=0.002):
+    """Retourne (transactions avec fraudes, labels de vérité terrain)."""
+    df = df.copy()
+    profile = accounts.merge(customers[["customer_id", "country", "typical_amount"]],
+                             on="customer_id").set_index("account_id")
+    n = max(1, int(len(df) * rate))
+    spike, foreign, night = np.split(rng.choice(len(df), 3 * n, replace=False), 3)
+    labels = []
+
+    # 1. Montant anormal
+    typical = profile.loc[df.loc[spike, "account_id"], "typical_amount"].to_numpy()
+    df.loc[spike, "amount"] = (typical * rng.uniform(8, 20, n)).round(2)
+
+    # 2. Pays différent du pays de résidence
+    home = profile.loc[df.loc[foreign, "account_id"], "country"].to_numpy()
+    df.loc[foreign, "country"] = [rng.choice([c for c in COUNTRIES if c != h]) for h in home]
+
+    # 3. Activité nocturne avec montant élevé
+    secs = rng.integers(3600, 5 * 3600, n)
+    df.loc[night, "transaction_timestamp"] = pd.Timestamp(day) + pd.to_timedelta(secs, unit="s")
+    df.loc[night, "amount"] = (df.loc[night, "amount"] * 3).round(2)
+
+    for name, rows in [("amount_spike", spike), ("foreign_country", foreign),
+                       ("night_activity", night)]:
+        labels += [(tid, name) for tid in df.loc[rows, "transaction_id"]]
+
+    # 4. Rafale : nouvelles transactions, montants normaux, seule la fréquence est suspecte
+    bursts = []
+    for b in range(n):
+        acc_id = rng.choice(profile.index)
+        start = pd.Timestamp(day) + pd.Timedelta(seconds=int(rng.integers(0, 86400 - 600)))
+        for k in range(int(rng.integers(5, 9))):
+            tid = f"T{day:%Y%m%d}B{b:03d}{k:02d}"
+            bursts.append({
+                "transaction_id": tid,
+                "account_id": acc_id,
+                "counterparty_account_id": f"X{int(rng.integers(0, 10**7)):07d}",
+                "amount": round(profile.at[acc_id, "typical_amount"] * rng.uniform(0.5, 1.5), 2),
+                "currency": profile.at[acc_id, "currency"],
+                "transaction_type": "card_payment",
+                "country": profile.at[acc_id, "country"],
+                "transaction_timestamp": start + pd.Timedelta(seconds=int(rng.integers(0, 600))),
+            })
+            labels.append((tid, "burst"))
+
+    df = (pd.concat([df, pd.DataFrame(bursts)])
+            .sort_values("transaction_timestamp").reset_index(drop=True))
+    return df, pd.DataFrame(labels, columns=["transaction_id", "scenario"])
 
 def main():
     p = argparse.ArgumentParser()
@@ -110,10 +164,12 @@ def main():
     for i in range(args.days):
         day = args.start + timedelta(days=i)
         tx = generate_day(day, customers, accounts, args.tx_per_day, args.seed)
+        rng_fraud = np.random.default_rng([args.seed, day.toordinal(), 2])
+        tx, frauds = inject_frauds(tx, customers, accounts, day, rng_fraud)
         rng_defects = np.random.default_rng([args.seed, day.toordinal(), 1])
-        dirty, manifest = inject_defects(tx, rng_defects)
+        dirty, manifest = inject_defects(tx, rng_defects, exclude_ids=frauds["transaction_id"])
         dirty.to_csv(args.out / f"transactions_{day:%Y-%m-%d}.csv", index=False)
         manifest.to_csv(args.truth_out / f"defects_{day:%Y-%m-%d}.csv", index=False)
-
+        frauds.to_csv(args.truth_out / f"frauds_{day:%Y-%m-%d}.csv", index=False)
 if __name__ == "__main__":
     main()
