@@ -1,0 +1,16 @@
+name: finance_platform
+version: "1.0.0"
+profile: finance_platform
+
+model-paths: ["models"]
+test-paths: ["tests"]
+macro-paths: ["macros"]
+
+flags:
+  send_anonymous_usage_stats: false
+
+models:
+  finance_platform:
+    staging:
+      +schema: staging
+      +materialized: view
