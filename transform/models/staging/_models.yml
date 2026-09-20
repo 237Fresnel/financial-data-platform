@@ -1,0 +1,29 @@
+version: 2
+
+models:
+  - name: stg_customers
+    description: Référentiel clients typé, une ligne par client.
+    columns:
+      - name: customer_id
+        data_tests: [not_null, unique]
+      - name: segment
+        data_tests:
+          - accepted_values:
+              values: ['retail', 'business']
+
+  - name: stg_accounts
+    description: Référentiel comptes typé, une ligne par compte.
+    columns:
+      - name: account_id
+        data_tests: [not_null, unique]
+      - name: customer_id
+        data_tests:
+          - not_null
+          - relationships:
+              to: ref('stg_customers')
+              field: customer_id
+      - name: currency
+        data_tests:
+          - relationships:
+              to: ref('currencies')
+              field: currency_code

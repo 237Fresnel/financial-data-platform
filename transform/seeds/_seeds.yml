@@ -1,0 +1,11 @@
+version: 2
+
+seeds:
+  - name: currencies
+    description: Devises autorisées et taux de conversion fixes (illustratifs).
+    config:
+      column_types:
+        rate_to_eur: numeric(12,6)
+    columns:
+      - name: currency_code
+        data_tests: [not_null, unique]

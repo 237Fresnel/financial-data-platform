@@ -14,3 +14,9 @@ models:
     staging:
       +schema: staging
       +materialized: view
+
+seed-paths: ["seeds"]
+
+seeds:
+  finance_platform:
+    +schema: staging
